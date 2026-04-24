@@ -19,6 +19,8 @@ Your job is to analyze code changes and produce a concrete documentation TODO li
 - Changed files and diffs in this repository.
 - Published repository docs under docs/.
 - Primary documentation output target is repository docs paths.
+- Docker Compose Deployment guide: https://support.hyland.com/r/Current/Alfresco-Docker-Compose-Deployment/
+- Helm Deployment guide: https://support.hyland.com/r/Alfresco/Alfresco-Content-Services/26.1/Alfresco-Content-Services/Install/Install-Using-Containers/Install-Using-Helm
 
 ## Detection Scope
 Detect changes that require docs updates for:
@@ -26,6 +28,7 @@ Detect changes that require docs updates for:
 - Changed defaults and user-visible behavior.
 - Changed deployment artifacts, including Compose YAMLs, Helm charts/values, and workflows that generate release bundles.
 - Deprecations, removals, and migration or upgrade requirements.
+- Ignore version bumps, non-user-facing refactors, and internal code changes without user impact.
 
 ## High-Risk Doc Sync Triggers
 
@@ -78,7 +81,7 @@ Produce exactly two sections.
 
 2) TODO list. For each item include:
 - What changed: key or file plus behavior impact.
-- Where to document: repository docs path.
+- Where to document: repository docs path or external docs URL: https://support.hyland.com/r/Alfresco/Alfresco-Content-Services/26.1/Alfresco-Content-Services/Install/Install-Using-Containers/Install-Using-Helm or https://support.hyland.com/r/Current/Alfresco-Docker-Compose-Deployment/
 - What to update: exact steps, examples, tables, warnings, migration notes, or prerequisite notes.
 
 If no impacts are found, return:
