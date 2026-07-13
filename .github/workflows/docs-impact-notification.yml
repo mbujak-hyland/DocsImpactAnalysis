@@ -96,17 +96,26 @@ jobs:
       - name: Create documentation review issue
         if: steps.verdict.outputs.verdict == 'Required'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ steps.verdict.outputs.pr_title }}
+          PR_URL: ${{ steps.verdict.outputs.pr_url }}
+          MERGED_AT: ${{ steps.verdict.outputs.merged_at }}
+          AUTHOR: ${{ steps.verdict.outputs.author }}
+          BREAKING: ${{ steps.verdict.outputs.breaking }}
+          FINDINGS_MD: ${{ steps.verdict.outputs.findings_md }}
+          AMBIGUOUS_MD: ${{ steps.verdict.outputs.ambiguous_md }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const prNumber  = ${{ github.event.pull_request.number }};
-            const prTitle   = `${{ steps.verdict.outputs.pr_title }}`;
-            const prUrl     = `${{ steps.verdict.outputs.pr_url }}`;
-            const mergedAt  = `${{ steps.verdict.outputs.merged_at }}`;
-            const author    = `${{ steps.verdict.outputs.author }}`;
-            const breaking  = `${{ steps.verdict.outputs.breaking }}` === 'true';
-            const findings  = `${{ steps.verdict.outputs.findings_md }}`;
-            const ambiguous = `${{ steps.verdict.outputs.ambiguous_md }}`;
+            const prNumber   = parseInt(process.env.PR_NUMBER, 10);
+            const prTitle    = process.env.PR_TITLE;
+            const prUrl      = process.env.PR_URL;
+            const mergedAt   = process.env.MERGED_AT;
+            const author     = process.env.AUTHOR;
+            const breaking   = process.env.BREAKING === 'true';
+            const findings   = process.env.FINDINGS_MD;
+            const ambiguous  = process.env.AMBIGUOUS_MD;
             const techWriter = process.env.TECH_WRITER;
 
             const breakingBadge = breaking
@@ -151,20 +160,24 @@ jobs:
       - name: Post verdict as PR comment
         if: steps.verdict.outputs.verdict == 'Required' || steps.verdict.outputs.verdict == 'Not Required'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        env:
+          VERDICT: ${{ steps.verdict.outputs.verdict }}
+          REASON: ${{ steps.verdict.outputs.reason }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const verdict = `${{ steps.verdict.outputs.verdict }}`;
-            const reason  = `${{ steps.verdict.outputs.reason }}`;
+            const verdict = process.env.VERDICT;
+            const reason  = process.env.REASON;
             const icon    = verdict === 'Required' ? '📋' : '✅';
             const label   = verdict === 'Required'
-              ? 'A documentation review issue has been created and assigned to @${{ env.TECH_WRITER }}.'
+              ? `A documentation review issue has been created and assigned to @${process.env.TECH_WRITER}.`
               : `No documentation update required. ${reason}`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: ${{ github.event.pull_request.number }},
+              issue_number: parseInt(process.env.PR_NUMBER, 10),
               body: `${icon} **Docs Impact Check:** ${verdict}\n\n${label}`,
             });
 
