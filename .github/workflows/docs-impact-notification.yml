@@ -1,0 +1,175 @@
+---
+name: Docs Impact Notification
+
+on:
+  pull_request:
+    types: [closed]
+
+# Only run when a PR is actually merged (not just closed/abandoned)
+jobs:
+  check-docs-impact:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # Required for Copilot agent to write verdict file
+      issues: write         # Required to create the notification issue
+      pull-requests: read   # Required to read PR metadata
+
+    env:
+      # GitHub username of the technical writer to notify.
+      # Update this value to change who receives documentation review issues.
+      TECH_WRITER: mbujak-hyland
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Analyze PR for documentation impact
+        id: copilot
+        uses: github/copilot-coding-agent@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          agent: docs-impact-notifier
+          prompt: |
+            Analyze PR #${{ github.event.pull_request.number }} in repository
+            `${{ github.repository }}` for documentation impact.
+
+            Follow the agent instructions in
+            `.github/agents/docs-impact-notifier.agent.md` exactly.
+
+            Write the verdict to `docs-impact-verdict.json` in the workspace root.
+            Do not modify any other file. Do not commit anything.
+
+      - name: Read verdict file
+        id: verdict
+        run: |
+          if [ ! -f docs-impact-verdict.json ]; then
+            echo "verdict=error" >> "$GITHUB_OUTPUT"
+            echo "error_msg=The Copilot agent did not produce docs-impact-verdict.json." \
+              >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          VERDICT=$(jq -r '.verdict' docs-impact-verdict.json)
+          PR_TITLE=$(jq -r '.pr_title' docs-impact-verdict.json)
+          PR_URL=$(jq -r '.pr_url' docs-impact-verdict.json)
+          MERGED_AT=$(jq -r '.merged_at' docs-impact-verdict.json)
+          AUTHOR=$(jq -r '.author' docs-impact-verdict.json)
+          BREAKING=$(jq -r '.breaking_changes' docs-impact-verdict.json)
+          REASON=$(jq -r '.reason' docs-impact-verdict.json)
+
+          # Build a markdown findings list for use in the issue body
+          FINDINGS_MD=$(jq -r '
+            .findings[] |
+            "**[\(.id)] \(.description)**\n" +
+            "- File: `\(.file)`\n" +
+            "- Change type: \(.change_type)\n" +
+            "- Audience: \(.audience)\n" +
+            "- Breaking: \(.breaking)\n" +
+            "- \(.summary)\n"
+          ' docs-impact-verdict.json)
+
+          AMBIGUOUS_MD=$(jq -r '
+            .ambiguous[] |
+            "**[\(.id)] \(.description)**\n" +
+            "- File: `\(.file)`\n" +
+            "- Why ambiguous: \(.why_ambiguous)\n" +
+            "- Treated as: \(.treated_as)\n"
+          ' docs-impact-verdict.json)
+
+          {
+            echo "verdict=$VERDICT"
+            echo "pr_title=$PR_TITLE"
+            echo "pr_url=$PR_URL"
+            echo "merged_at=$MERGED_AT"
+            echo "author=$AUTHOR"
+            echo "breaking=$BREAKING"
+            echo "reason=$REASON"
+            echo "findings_md<<FINDINGS_EOF"
+            echo "$FINDINGS_MD"
+            echo "FINDINGS_EOF"
+            echo "ambiguous_md<<AMBIGUOUS_EOF"
+            echo "$AMBIGUOUS_MD"
+            echo "AMBIGUOUS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create documentation review issue
+        if: steps.verdict.outputs.verdict == 'Required'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber  = ${{ github.event.pull_request.number }};
+            const prTitle   = `${{ steps.verdict.outputs.pr_title }}`;
+            const prUrl     = `${{ steps.verdict.outputs.pr_url }}`;
+            const mergedAt  = `${{ steps.verdict.outputs.merged_at }}`;
+            const author    = `${{ steps.verdict.outputs.author }}`;
+            const breaking  = `${{ steps.verdict.outputs.breaking }}` === 'true';
+            const findings  = `${{ steps.verdict.outputs.findings_md }}`;
+            const ambiguous = `${{ steps.verdict.outputs.ambiguous_md }}`;
+            const techWriter = process.env.TECH_WRITER;
+
+            const breakingBadge = breaking
+              ? '> [!WARNING]\n> This PR contains **breaking changes**. Priority review required.\n\n'
+              : '';
+
+            const ambiguousSection = ambiguous.trim()
+              ? `\n### Ambiguous Changes\n\n> These changes could not be conclusively classified and are treated as doc-impacting.\n\n${ambiguous}`
+              : '';
+
+            const body = [
+              `## Documentation Review Required`,
+              ``,
+              breakingBadge,
+              `Merged PR **[#${prNumber} — ${prTitle}](${prUrl})** requires a documentation update.`,
+              ``,
+              `| Field | Value |`,
+              `|---|---|`,
+              `| **Merged at** | ${mergedAt} |`,
+              `| **Author** | @${author} |`,
+              `| **Breaking changes** | ${breaking ? 'Yes ⚠️' : 'No'} |`,
+              ``,
+              `### Findings`,
+              ``,
+              findings,
+              ambiguousSection,
+              `---`,
+              ``,
+              `@${techWriter} please review the findings above and update the documentation accordingly.`,
+            ].join('\n');
+
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Docs Review] PR #${prNumber}: ${prTitle}`,
+              body: body,
+              assignees: [techWriter],
+            });
+
+            core.info(`Created documentation review issue: ${issue.data.html_url}`);
+
+      - name: Post verdict as PR comment
+        if: steps.verdict.outputs.verdict == 'Required' || steps.verdict.outputs.verdict == 'Not Required'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const verdict = `${{ steps.verdict.outputs.verdict }}`;
+            const reason  = `${{ steps.verdict.outputs.reason }}`;
+            const icon    = verdict === 'Required' ? '📋' : '✅';
+            const label   = verdict === 'Required'
+              ? 'A documentation review issue has been created and assigned to @${{ env.TECH_WRITER }}.'
+              : `No documentation update required. ${reason}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ github.event.pull_request.number }},
+              body: `${icon} **Docs Impact Check:** ${verdict}\n\n${label}`,
+            });
+
+      - name: Handle analysis error
+        if: steps.verdict.outputs.verdict == 'error'
+        run: |
+          echo "::warning::Docs impact analysis failed: ${{ steps.verdict.outputs.error_msg }}"
+          echo "::warning::Manual documentation review may be required for PR #${{ github.event.pull_request.number }}."
