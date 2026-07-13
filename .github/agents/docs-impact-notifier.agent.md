@@ -21,27 +21,12 @@ The workflow that invokes you will supply:
 ## Procedure
 
 Follow the skill at `.agents/skills/checking-doc-impact-standalone-for-PR/SKILL.md`
-exactly.
+exactly. Do not deviate from or summarize its steps.
 
-### Step 1 — Fetch the diff and PR metadata
+## Output
 
-```bash
-gh pr diff "$PR_NUMBER" --repo "$REPO"
-gh pr view "$PR_NUMBER" --repo "$REPO" \
-  --json number,title,url,mergedAt,author,baseRefName
-```
-
-### Step 2 — Classify each changed file
-
-Apply the doc-impacting / never doc-impacting / ambiguous rules from the skill.
-Treat ambiguous changes as doc-impacting (conservative default).
-
-### Step 3 — Write the verdict file
-
-Write **only** the file `docs-impact-verdict.json` to the workspace root.
-Do not modify any other file. Do not commit anything.
-
-The file must use this exact structure:
+Write **only** the file `docs-impact-verdict.json` to the workspace root using
+this exact structure:
 
 ```json
 {
