@@ -31,23 +31,90 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Analyze PR for documentation impact
-        id: copilot
-        uses: github/copilot-coding-agent@v1
+        id: analyzer
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          agent: docs-impact-notifier
-          prompt: |
-            Analyze PR #${{ github.event.pull_request.number || inputs.pr_number }}
-            in repository `${{ github.repository }}` for documentation impact.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
 
-            Follow the agent instructions in
-            `.github/agents/docs-impact-notifier.agent.md` exactly.
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const isManual = context.eventName === 'workflow_dispatch';
+            const manualInput = context.payload.inputs?.pr_number;
 
-            Use the associated skill-driven process to determine whether
-            documentation updates are required.
+            let pr;
+            let prNumber;
 
-            Write the verdict to `docs-impact-verdict.json` in the workspace root.
-            Do not modify any other file. Do not commit anything.
+            if (isManual) {
+              prNumber = parseInt(manualInput, 10);
+              if (!Number.isInteger(prNumber) || prNumber <= 0) {
+                core.setFailed('Invalid pr_number input. Provide a positive integer PR number.');
+                return;
+              }
+
+              const prResp = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: prNumber,
+              });
+              pr = prResp.data;
+            } else {
+              pr = context.payload.pull_request;
+              prNumber = pr.number;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            const docPathRegex = /(^|\/)(docs?|documentation|changelog|changes)(\/|$)|\.(md|rst|adoc|txt)$/i;
+            const docOnly = files.length > 0 && files.every((f) => docPathRegex.test(f.filename));
+
+            const findings = [];
+            let idCounter = 1;
+
+            if (!docOnly) {
+              for (const f of files) {
+                if (docPathRegex.test(f.filename)) {
+                  continue;
+                }
+
+                findings.push({
+                  id: `F-${String(idCounter++).padStart(3, '0')}`,
+                  description: 'Non-documentation change detected',
+                  file: f.filename,
+                  change_type: f.status,
+                  audience: 'User/Admin/Operator',
+                  breaking: f.status === 'removed',
+                  summary: 'This change may affect behavior or configuration and should be reviewed for documentation impact.',
+                });
+              }
+            }
+
+            const verdict = docOnly ? 'Not Required' : 'Required';
+            const reason = docOnly
+              ? 'PR appears to contain documentation-only changes.'
+              : 'PR includes non-documentation changes that require documentation review.';
+
+            const verdictPayload = {
+              pr_number: prNumber,
+              verdict,
+              reason,
+              pr_title: pr.title,
+              pr_url: pr.html_url,
+              merged_at: pr.merged_at,
+              author: pr.user?.login || '',
+              breaking_changes: findings.some((f) => f.breaking),
+              findings,
+              ambiguous: [],
+            };
+
+            fs.writeFileSync('docs-impact-verdict.json', JSON.stringify(verdictPayload, null, 2));
+            core.info(`Wrote docs-impact-verdict.json with verdict: ${verdict}`);
 
       - name: Read verdict file
         id: verdict
