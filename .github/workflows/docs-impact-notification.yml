@@ -4,11 +4,17 @@ name: Docs Impact Notification
 on:
   pull_request:
     types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Merged PR number to analyze'
+        required: true
+        type: string
 
 # Only run when a PR is actually merged (not just closed/abandoned)
 jobs:
   check-docs-impact:
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
       contents: read        # Required to checkout repository files
@@ -34,8 +40,29 @@ jobs:
 
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const pr = context.payload.pull_request;
-            const prNumber = pr.number;
+            const isManual = context.eventName === 'workflow_dispatch';
+            const manualInput = context.payload.inputs?.pr_number;
+
+            let pr;
+            let prNumber;
+
+            if (isManual) {
+              prNumber = parseInt(manualInput, 10);
+              if (!Number.isInteger(prNumber) || prNumber <= 0) {
+                core.setFailed('Invalid pr_number input. Provide a positive integer PR number.');
+                return;
+              }
+
+              const prResp = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: prNumber,
+              });
+              pr = prResp.data;
+            } else {
+              pr = context.payload.pull_request;
+              prNumber = pr.number;
+            }
 
             const files = await github.paginate(github.rest.pulls.listFiles, {
               owner,
@@ -110,6 +137,7 @@ jobs:
             const breakingChanges = findings.some((f) => f.breaking);
 
             const verdictPayload = {
+              pr_number: prNumber,
               verdict,
               reason,
               pr_title: pr.title,
@@ -129,12 +157,14 @@ jobs:
         run: |
           if [ ! -f docs-impact-verdict.json ]; then
             echo "verdict=error" >> "$GITHUB_OUTPUT"
+            echo "pr_number=${{ github.event.pull_request.number || inputs.pr_number }}" >> "$GITHUB_OUTPUT"
             echo "error_msg=The Copilot agent did not produce docs-impact-verdict.json." \
               >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           VERDICT=$(jq -r '.verdict' docs-impact-verdict.json)
+          PR_NUMBER=$(jq -r '.pr_number' docs-impact-verdict.json)
           PR_TITLE=$(jq -r '.pr_title' docs-impact-verdict.json)
           PR_URL=$(jq -r '.pr_url' docs-impact-verdict.json)
           MERGED_AT=$(jq -r '.merged_at' docs-impact-verdict.json)
@@ -163,6 +193,7 @@ jobs:
 
           {
             echo "verdict=$VERDICT"
+            echo "pr_number=$PR_NUMBER"
             echo "pr_title=$PR_TITLE"
             echo "pr_url=$PR_URL"
             echo "merged_at=$MERGED_AT"
@@ -181,7 +212,7 @@ jobs:
         if: steps.verdict.outputs.verdict == 'Required'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.verdict.outputs.pr_number }}
           PR_TITLE: ${{ steps.verdict.outputs.pr_title }}
           PR_URL: ${{ steps.verdict.outputs.pr_url }}
           MERGED_AT: ${{ steps.verdict.outputs.merged_at }}
@@ -247,7 +278,7 @@ jobs:
         env:
           VERDICT: ${{ steps.verdict.outputs.verdict }}
           REASON: ${{ steps.verdict.outputs.reason }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_NUMBER: ${{ steps.verdict.outputs.pr_number }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -269,4 +300,4 @@ jobs:
         if: steps.verdict.outputs.verdict == 'error'
         run: |
           echo "::warning::Docs impact analysis failed: ${{ steps.verdict.outputs.error_msg }}"
-          echo "::warning::Manual documentation review may be required for PR #${{ github.event.pull_request.number }}."
+          echo "::warning::Manual documentation review may be required for PR #${{ steps.verdict.outputs.pr_number }}."
