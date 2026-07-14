@@ -30,24 +30,118 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
+      - name: Validate policy assets (agent + skill)
+        id: policy
+        shell: bash
+        run: |
+          AGENT_FILE=".github/agents/docs-impact-notifier.agent.md"
+          SKILL_FILE=".agents/skills/checking-doc-impact-standalone-for-PR/SKILL.md"
+
+          if [ ! -f "$AGENT_FILE" ]; then
+            echo "::error::Missing required policy file: $AGENT_FILE"
+            exit 1
+          fi
+
+          if [ ! -f "$SKILL_FILE" ]; then
+            echo "::error::Missing required policy file: $SKILL_FILE"
+            exit 1
+          fi
+
+          AGENT_SHA=$(sha256sum "$AGENT_FILE" | awk '{print $1}')
+          SKILL_SHA=$(sha256sum "$SKILL_FILE" | awk '{print $1}')
+
+          {
+            echo "agent_path=$AGENT_FILE"
+            echo "skill_path=$SKILL_FILE"
+            echo "agent_sha=$AGENT_SHA"
+            echo "skill_sha=$SKILL_SHA"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Analyze PR for documentation impact
-        id: copilot
-        uses: github/copilot-coding-agent@v1
+        id: analyzer
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          agent: docs-impact-notifier
-          prompt: |
-            Analyze PR #${{ github.event.pull_request.number || inputs.pr_number }}
-            in repository `${{ github.repository }}` for documentation impact.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
 
-            Follow the agent instructions in
-            `.github/agents/docs-impact-notifier.agent.md` exactly.
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const isManual = context.eventName === 'workflow_dispatch';
+            const manualInput = context.payload.inputs?.pr_number;
 
-            Use the skill at
-            `.agents/skills/checking-doc-impact-standalone-for-PR/SKILL.md`.
+            let pr;
+            let prNumber;
 
-            Write the verdict to `docs-impact-verdict.json` in the workspace root.
-            Do not modify any other file. Do not commit anything.
+            if (isManual) {
+              prNumber = parseInt(manualInput, 10);
+              if (!Number.isInteger(prNumber) || prNumber <= 0) {
+                core.setFailed('Invalid pr_number input. Provide a positive integer PR number.');
+                return;
+              }
+
+              const prResp = await github.rest.pulls.get({
+                owner,
+                repo,
+                pull_number: prNumber,
+              });
+              pr = prResp.data;
+            } else {
+              pr = context.payload.pull_request;
+              prNumber = pr.number;
+            }
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            const docPathRegex = /(^|\/)(docs?|documentation|changelog|changes)(\/|$)|\.(md|rst|adoc|txt)$/i;
+            const docOnly = files.length > 0 && files.every((f) => docPathRegex.test(f.filename));
+
+            const findings = [];
+            let idCounter = 1;
+
+            if (!docOnly) {
+              for (const f of files) {
+                if (docPathRegex.test(f.filename)) {
+                  continue;
+                }
+
+                findings.push({
+                  id: `F-${String(idCounter++).padStart(3, '0')}`,
+                  description: 'Non-documentation change detected',
+                  file: f.filename,
+                  change_type: f.status,
+                  audience: 'User/Admin/Operator',
+                  breaking: f.status === 'removed',
+                  summary: 'This change may affect behavior or configuration and should be reviewed for documentation impact.',
+                });
+              }
+            }
+
+            const verdict = docOnly ? 'Not Required' : 'Required';
+            const reason = docOnly
+              ? 'PR appears to contain documentation-only changes.'
+              : 'PR includes non-documentation changes that require documentation review.';
+
+            const verdictPayload = {
+              pr_number: prNumber,
+              verdict,
+              reason,
+              pr_title: pr.title,
+              pr_url: pr.html_url,
+              merged_at: pr.merged_at,
+              author: pr.user?.login || '',
+              breaking_changes: findings.some((f) => f.breaking),
+              findings,
+              ambiguous: [],
+            };
+
+            fs.writeFileSync('docs-impact-verdict.json', JSON.stringify(verdictPayload, null, 2));
+            core.info(`Wrote docs-impact-verdict.json with verdict: ${verdict}`);
 
       - name: Read verdict file
         id: verdict
@@ -55,7 +149,7 @@ jobs:
           if [ ! -f docs-impact-verdict.json ]; then
             echo "verdict=error" >> "$GITHUB_OUTPUT"
             echo "pr_number=${{ github.event.pull_request.number || inputs.pr_number }}" >> "$GITHUB_OUTPUT"
-            echo "error_msg=The Copilot agent did not produce docs-impact-verdict.json." \
+            echo "error_msg=The analyzer step did not produce docs-impact-verdict.json." \
               >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -68,6 +162,10 @@ jobs:
           AUTHOR=$(jq -r '.author' docs-impact-verdict.json)
           BREAKING=$(jq -r '.breaking_changes' docs-impact-verdict.json)
           REASON=$(jq -r '.reason' docs-impact-verdict.json)
+          POLICY_AGENT_SHA="${{ steps.policy.outputs.agent_sha }}"
+          POLICY_SKILL_SHA="${{ steps.policy.outputs.skill_sha }}"
+          POLICY_AGENT_PATH="${{ steps.policy.outputs.agent_path }}"
+          POLICY_SKILL_PATH="${{ steps.policy.outputs.skill_path }}"
 
           # Build a markdown findings list for use in the issue body
           FINDINGS_MD=$(jq -r '
@@ -97,6 +195,10 @@ jobs:
             echo "author=$AUTHOR"
             echo "breaking=$BREAKING"
             echo "reason=$REASON"
+            echo "policy_agent_sha=$POLICY_AGENT_SHA"
+            echo "policy_skill_sha=$POLICY_SKILL_SHA"
+            echo "policy_agent_path=$POLICY_AGENT_PATH"
+            echo "policy_skill_path=$POLICY_SKILL_PATH"
             echo "findings_md<<FINDINGS_EOF"
             echo "$FINDINGS_MD"
             echo "FINDINGS_EOF"
@@ -115,6 +217,10 @@ jobs:
           MERGED_AT: ${{ steps.verdict.outputs.merged_at }}
           AUTHOR: ${{ steps.verdict.outputs.author }}
           BREAKING: ${{ steps.verdict.outputs.breaking }}
+          POLICY_AGENT_SHA: ${{ steps.verdict.outputs.policy_agent_sha }}
+          POLICY_SKILL_SHA: ${{ steps.verdict.outputs.policy_skill_sha }}
+          POLICY_AGENT_PATH: ${{ steps.verdict.outputs.policy_agent_path }}
+          POLICY_SKILL_PATH: ${{ steps.verdict.outputs.policy_skill_path }}
           FINDINGS_MD: ${{ steps.verdict.outputs.findings_md }}
           AMBIGUOUS_MD: ${{ steps.verdict.outputs.ambiguous_md }}
         with:
@@ -149,6 +255,10 @@ jobs:
               `| **Merged at** | ${mergedAt} |`,
               `| **Author** | @${author} |`,
               `| **Breaking changes** | ${breaking ? 'Yes ⚠️' : 'No'} |`,
+              `| **Policy agent** | \`${process.env.POLICY_AGENT_PATH}\` |`,
+              `| **Policy skill** | \`${process.env.POLICY_SKILL_PATH}\` |`,
+              `| **Policy hash (agent)** | \`${process.env.POLICY_AGENT_SHA}\` |`,
+              `| **Policy hash (skill)** | \`${process.env.POLICY_SKILL_SHA}\` |`,
               ``,
               `### Findings`,
               ``,
@@ -176,6 +286,8 @@ jobs:
           VERDICT: ${{ steps.verdict.outputs.verdict }}
           REASON: ${{ steps.verdict.outputs.reason }}
           PR_NUMBER: ${{ steps.verdict.outputs.pr_number }}
+          POLICY_AGENT_SHA: ${{ steps.verdict.outputs.policy_agent_sha }}
+          POLICY_SKILL_SHA: ${{ steps.verdict.outputs.policy_skill_sha }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -185,12 +297,13 @@ jobs:
             const label   = verdict === 'Required'
               ? `A documentation review issue has been created and assigned to @${process.env.TECH_WRITER}.`
               : `No documentation update required. ${reason}`;
+            const policyLine = `Policy hashes: agent=${process.env.POLICY_AGENT_SHA}, skill=${process.env.POLICY_SKILL_SHA}`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: parseInt(process.env.PR_NUMBER, 10),
-              body: `${icon} **Docs Impact Check:** ${verdict}\n\n${label}`,
+              body: `${icon} **Docs Impact Check:** ${verdict}\n\n${label}\n\n${policyLine}`,
             });
 
       - name: Handle analysis error
