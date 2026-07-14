@@ -30,33 +30,6 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
-      - name: Validate policy assets (agent + skill)
-        id: policy
-        shell: bash
-        run: |
-          AGENT_FILE=".github/agents/docs-impact-notifier.agent.md"
-          SKILL_FILE=".agents/skills/checking-doc-impact-standalone-for-PR/SKILL.md"
-
-          if [ ! -f "$AGENT_FILE" ]; then
-            echo "::error::Missing required policy file: $AGENT_FILE"
-            exit 1
-          fi
-
-          if [ ! -f "$SKILL_FILE" ]; then
-            echo "::error::Missing required policy file: $SKILL_FILE"
-            exit 1
-          fi
-
-          AGENT_SHA=$(sha256sum "$AGENT_FILE" | awk '{print $1}')
-          SKILL_SHA=$(sha256sum "$SKILL_FILE" | awk '{print $1}')
-
-          {
-            echo "agent_path=$AGENT_FILE"
-            echo "skill_path=$SKILL_FILE"
-            echo "agent_sha=$AGENT_SHA"
-            echo "skill_sha=$SKILL_SHA"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Analyze PR for documentation impact
         id: analyzer
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
@@ -98,34 +71,70 @@ jobs:
               per_page: 100,
             });
 
-            const docPathRegex = /(^|\/)(docs?|documentation|changelog|changes)(\/|$)|\.(md|rst|adoc|txt)$/i;
-            const docOnly = files.length > 0 && files.every((f) => docPathRegex.test(f.filename));
-
             const findings = [];
+            const ambiguous = [];
+
+            const hasDocsChanges = files.some((f) => f.filename.startsWith('docs/'));
+
             let idCounter = 1;
+            const addFinding = (f, description, summary, audience = 'operators') => {
+              findings.push({
+                id: `F-${String(idCounter++).padStart(3, '0')}`,
+                file: f.filename,
+                change_type: f.status,
+                description,
+                audience,
+                breaking: f.status === 'removed',
+                summary,
+              });
+            };
 
-            if (!docOnly) {
-              for (const f of files) {
-                if (docPathRegex.test(f.filename)) {
-                  continue;
-                }
+            for (const f of files) {
+              const path = f.filename;
 
-                findings.push({
-                  id: `F-${String(idCounter++).padStart(3, '0')}`,
-                  description: 'Non-documentation change detected',
+              if (path.startsWith('docker-compose/')) {
+                addFinding(
+                  f,
+                  'Docker Compose deployment artifact changed',
+                  'Compose configuration changed and may require deployment documentation updates.'
+                );
+                continue;
+              }
+
+              if (path.startsWith('helm/')) {
+                addFinding(
+                  f,
+                  'Helm chart artifact changed',
+                  'Helm chart values/templates changed and may require Helm deployment documentation updates.'
+                );
+                continue;
+              }
+
+              if (path.startsWith('updatecli.d/')) {
+                ambiguous.push({
+                  id: `A-${String(idCounter++).padStart(3, '0')}`,
                   file: f.filename,
-                  change_type: f.status,
-                  audience: 'User/Admin/Operator',
-                  breaking: f.status === 'removed',
-                  summary: 'This change may affect behavior or configuration and should be reviewed for documentation impact.',
+                  description: 'Automation config changed',
+                  why_ambiguous: 'UpdateCLI changes can affect published image/version references indirectly.',
+                  treated_as: 'doc-impacting',
                 });
               }
             }
 
-            const verdict = docOnly ? 'Not Required' : 'Required';
-            const reason = docOnly
-              ? 'PR appears to contain documentation-only changes.'
-              : 'PR includes non-documentation changes that require documentation review.';
+            let verdict = 'Not Required';
+            let reason = 'No deployment-impacting Docker Compose or Helm changes detected.';
+
+            if (findings.length > 0 || ambiguous.length > 0) {
+              if (hasDocsChanges) {
+                verdict = 'Not Required';
+                reason = 'PR already contains documentation changes under docs/.';
+              } else {
+                verdict = 'Required';
+                reason = 'Deployment-related artifacts changed without corresponding docs/ updates.';
+              }
+            }
+
+            const breakingChanges = findings.some((f) => f.breaking);
 
             const verdictPayload = {
               pr_number: prNumber,
@@ -135,9 +144,9 @@ jobs:
               pr_url: pr.html_url,
               merged_at: pr.merged_at,
               author: pr.user?.login || '',
-              breaking_changes: findings.some((f) => f.breaking),
+              breaking_changes: breakingChanges,
               findings,
-              ambiguous: [],
+              ambiguous,
             };
 
             fs.writeFileSync('docs-impact-verdict.json', JSON.stringify(verdictPayload, null, 2));
@@ -149,7 +158,7 @@ jobs:
           if [ ! -f docs-impact-verdict.json ]; then
             echo "verdict=error" >> "$GITHUB_OUTPUT"
             echo "pr_number=${{ github.event.pull_request.number || inputs.pr_number }}" >> "$GITHUB_OUTPUT"
-            echo "error_msg=The analyzer step did not produce docs-impact-verdict.json." \
+            echo "error_msg=The Copilot agent did not produce docs-impact-verdict.json." \
               >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -162,10 +171,6 @@ jobs:
           AUTHOR=$(jq -r '.author' docs-impact-verdict.json)
           BREAKING=$(jq -r '.breaking_changes' docs-impact-verdict.json)
           REASON=$(jq -r '.reason' docs-impact-verdict.json)
-          POLICY_AGENT_SHA="${{ steps.policy.outputs.agent_sha }}"
-          POLICY_SKILL_SHA="${{ steps.policy.outputs.skill_sha }}"
-          POLICY_AGENT_PATH="${{ steps.policy.outputs.agent_path }}"
-          POLICY_SKILL_PATH="${{ steps.policy.outputs.skill_path }}"
 
           # Build a markdown findings list for use in the issue body
           FINDINGS_MD=$(jq -r '
@@ -195,10 +200,6 @@ jobs:
             echo "author=$AUTHOR"
             echo "breaking=$BREAKING"
             echo "reason=$REASON"
-            echo "policy_agent_sha=$POLICY_AGENT_SHA"
-            echo "policy_skill_sha=$POLICY_SKILL_SHA"
-            echo "policy_agent_path=$POLICY_AGENT_PATH"
-            echo "policy_skill_path=$POLICY_SKILL_PATH"
             echo "findings_md<<FINDINGS_EOF"
             echo "$FINDINGS_MD"
             echo "FINDINGS_EOF"
@@ -217,10 +218,6 @@ jobs:
           MERGED_AT: ${{ steps.verdict.outputs.merged_at }}
           AUTHOR: ${{ steps.verdict.outputs.author }}
           BREAKING: ${{ steps.verdict.outputs.breaking }}
-          POLICY_AGENT_SHA: ${{ steps.verdict.outputs.policy_agent_sha }}
-          POLICY_SKILL_SHA: ${{ steps.verdict.outputs.policy_skill_sha }}
-          POLICY_AGENT_PATH: ${{ steps.verdict.outputs.policy_agent_path }}
-          POLICY_SKILL_PATH: ${{ steps.verdict.outputs.policy_skill_path }}
           FINDINGS_MD: ${{ steps.verdict.outputs.findings_md }}
           AMBIGUOUS_MD: ${{ steps.verdict.outputs.ambiguous_md }}
         with:
@@ -255,10 +252,6 @@ jobs:
               `| **Merged at** | ${mergedAt} |`,
               `| **Author** | @${author} |`,
               `| **Breaking changes** | ${breaking ? 'Yes ⚠️' : 'No'} |`,
-              `| **Policy agent** | \`${process.env.POLICY_AGENT_PATH}\` |`,
-              `| **Policy skill** | \`${process.env.POLICY_SKILL_PATH}\` |`,
-              `| **Policy hash (agent)** | \`${process.env.POLICY_AGENT_SHA}\` |`,
-              `| **Policy hash (skill)** | \`${process.env.POLICY_SKILL_SHA}\` |`,
               ``,
               `### Findings`,
               ``,
@@ -286,8 +279,6 @@ jobs:
           VERDICT: ${{ steps.verdict.outputs.verdict }}
           REASON: ${{ steps.verdict.outputs.reason }}
           PR_NUMBER: ${{ steps.verdict.outputs.pr_number }}
-          POLICY_AGENT_SHA: ${{ steps.verdict.outputs.policy_agent_sha }}
-          POLICY_SKILL_SHA: ${{ steps.verdict.outputs.policy_skill_sha }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -297,13 +288,12 @@ jobs:
             const label   = verdict === 'Required'
               ? `A documentation review issue has been created and assigned to @${process.env.TECH_WRITER}.`
               : `No documentation update required. ${reason}`;
-            const policyLine = `Policy hashes: agent=${process.env.POLICY_AGENT_SHA}, skill=${process.env.POLICY_SKILL_SHA}`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: parseInt(process.env.PR_NUMBER, 10),
-              body: `${icon} **Docs Impact Check:** ${verdict}\n\n${label}\n\n${policyLine}`,
+              body: `${icon} **Docs Impact Check:** ${verdict}\n\n${label}`,
             });
 
       - name: Handle analysis error
