@@ -11,7 +11,7 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
-      contents: write       # Required for Copilot agent to write verdict file
+      contents: read        # Required to checkout repository files
       issues: write         # Required to create the notification issue
       pull-requests: read   # Required to read PR metadata
 
@@ -25,20 +25,104 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Analyze PR for documentation impact
-        id: copilot
-        uses: github/copilot-coding-agent@v1
+        id: analyzer
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          agent: docs-impact-notifier
-          prompt: |
-            Analyze PR #${{ github.event.pull_request.number }} in repository
-            `${{ github.repository }}` for documentation impact.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
 
-            Follow the agent instructions in
-            `.github/agents/docs-impact-notifier.agent.md` exactly.
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const pr = context.payload.pull_request;
+            const prNumber = pr.number;
 
-            Write the verdict to `docs-impact-verdict.json` in the workspace root.
-            Do not modify any other file. Do not commit anything.
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            const findings = [];
+            const ambiguous = [];
+
+            const hasDocsChanges = files.some((f) => f.filename.startsWith('docs/'));
+
+            let idCounter = 1;
+            const addFinding = (f, description, summary, audience = 'operators') => {
+              findings.push({
+                id: `F-${String(idCounter++).padStart(3, '0')}`,
+                file: f.filename,
+                change_type: f.status,
+                description,
+                audience,
+                breaking: f.status === 'removed',
+                summary,
+              });
+            };
+
+            for (const f of files) {
+              const path = f.filename;
+
+              if (path.startsWith('docker-compose/')) {
+                addFinding(
+                  f,
+                  'Docker Compose deployment artifact changed',
+                  'Compose configuration changed and may require deployment documentation updates.'
+                );
+                continue;
+              }
+
+              if (path.startsWith('helm/')) {
+                addFinding(
+                  f,
+                  'Helm chart artifact changed',
+                  'Helm chart values/templates changed and may require Helm deployment documentation updates.'
+                );
+                continue;
+              }
+
+              if (path.startsWith('updatecli.d/')) {
+                ambiguous.push({
+                  id: `A-${String(idCounter++).padStart(3, '0')}`,
+                  file: f.filename,
+                  description: 'Automation config changed',
+                  why_ambiguous: 'UpdateCLI changes can affect published image/version references indirectly.',
+                  treated_as: 'doc-impacting',
+                });
+              }
+            }
+
+            let verdict = 'Not Required';
+            let reason = 'No deployment-impacting Docker Compose or Helm changes detected.';
+
+            if (findings.length > 0 || ambiguous.length > 0) {
+              if (hasDocsChanges) {
+                verdict = 'Not Required';
+                reason = 'PR already contains documentation changes under docs/.';
+              } else {
+                verdict = 'Required';
+                reason = 'Deployment-related artifacts changed without corresponding docs/ updates.';
+              }
+            }
+
+            const breakingChanges = findings.some((f) => f.breaking);
+
+            const verdictPayload = {
+              verdict,
+              reason,
+              pr_title: pr.title,
+              pr_url: pr.html_url,
+              merged_at: pr.merged_at,
+              author: pr.user?.login || '',
+              breaking_changes: breakingChanges,
+              findings,
+              ambiguous,
+            };
+
+            fs.writeFileSync('docs-impact-verdict.json', JSON.stringify(verdictPayload, null, 2));
+            core.info(`Wrote docs-impact-verdict.json with verdict: ${verdict}`);
 
       - name: Read verdict file
         id: verdict
