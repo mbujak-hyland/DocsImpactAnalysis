@@ -18,7 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read        # Required to checkout repository files
-      pull-requests: read   # Required to read PR metadata and changed files
+      issues: write         # Required to create the notification issue
+      pull-requests: write  # Required to comment on merged PR threads
 
     env:
       # GitHub username of the technical writer to notify.
@@ -207,8 +208,9 @@ jobs:
             echo "AMBIGUOUS_EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Notify technical writer (read-only)
+      - name: Create documentation review issue
         if: steps.verdict.outputs.verdict == 'Required'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         env:
           PR_NUMBER: ${{ steps.verdict.outputs.pr_number }}
           PR_TITLE: ${{ steps.verdict.outputs.pr_title }}
@@ -218,41 +220,81 @@ jobs:
           BREAKING: ${{ steps.verdict.outputs.breaking }}
           FINDINGS_MD: ${{ steps.verdict.outputs.findings_md }}
           AMBIGUOUS_MD: ${{ steps.verdict.outputs.ambiguous_md }}
-        run: |
-          echo "::warning::Docs update required for PR #$PR_NUMBER. Notify @$TECH_WRITER."
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const prNumber   = parseInt(process.env.PR_NUMBER, 10);
+            const prTitle    = process.env.PR_TITLE;
+            const prUrl      = process.env.PR_URL;
+            const mergedAt   = process.env.MERGED_AT;
+            const author     = process.env.AUTHOR;
+            const breaking   = process.env.BREAKING === 'true';
+            const findings   = process.env.FINDINGS_MD;
+            const ambiguous  = process.env.AMBIGUOUS_MD;
+            const techWriter = process.env.TECH_WRITER;
 
-          {
-            echo "## Documentation Review Required"
-            echo
-            echo "Technical writer: @$TECH_WRITER"
-            echo
-            echo "Merged PR: [#$PR_NUMBER - $PR_TITLE]($PR_URL)"
-            echo
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| Merged at | $MERGED_AT |"
-            echo "| Author | @$AUTHOR |"
-            echo "| Breaking changes | $BREAKING |"
-            echo
-            echo "### Findings"
-            echo
-            echo "$FINDINGS_MD"
-            if [ -n "$AMBIGUOUS_MD" ]; then
-              echo
-              echo "### Ambiguous Changes"
-              echo
-              echo "$AMBIGUOUS_MD"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+            const breakingBadge = breaking
+              ? '> [!WARNING]\n> This PR contains **breaking changes**. Priority review required.\n\n'
+              : '';
 
-      - name: Report no documentation update needed
-        if: steps.verdict.outputs.verdict == 'Not Required'
-        run: |
-          echo "## Docs Impact Check" >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "No documentation update required." >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
-          echo "Reason: ${{ steps.verdict.outputs.reason }}" >> "$GITHUB_STEP_SUMMARY"
+            const ambiguousSection = ambiguous.trim()
+              ? `\n### Ambiguous Changes\n\n> These changes could not be conclusively classified and are treated as doc-impacting.\n\n${ambiguous}`
+              : '';
+
+            const body = [
+              `## Documentation Review Required`,
+              ``,
+              breakingBadge,
+              `Merged PR **[#${prNumber} — ${prTitle}](${prUrl})** requires a documentation update.`,
+              ``,
+              `| Field | Value |`,
+              `|---|---|`,
+              `| **Merged at** | ${mergedAt} |`,
+              `| **Author** | @${author} |`,
+              `| **Breaking changes** | ${breaking ? 'Yes ⚠️' : 'No'} |`,
+              ``,
+              `### Findings`,
+              ``,
+              findings,
+              ambiguousSection,
+              `---`,
+              ``,
+              `@${techWriter} please review the findings above and update the documentation accordingly.`,
+            ].join('\n');
+
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Docs Review] PR #${prNumber}: ${prTitle}`,
+              body: body,
+              assignees: [techWriter],
+            });
+
+            core.info(`Created documentation review issue: ${issue.data.html_url}`);
+
+      - name: Post verdict as PR comment
+        if: steps.verdict.outputs.verdict == 'Required' || steps.verdict.outputs.verdict == 'Not Required'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        env:
+          VERDICT: ${{ steps.verdict.outputs.verdict }}
+          REASON: ${{ steps.verdict.outputs.reason }}
+          PR_NUMBER: ${{ steps.verdict.outputs.pr_number }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const verdict = process.env.VERDICT;
+            const reason  = process.env.REASON;
+            const icon    = verdict === 'Required' ? '📋' : '✅';
+            const label   = verdict === 'Required'
+              ? `A documentation review issue has been created and assigned to @${process.env.TECH_WRITER}.`
+              : `No documentation update required. ${reason}`;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: parseInt(process.env.PR_NUMBER, 10),
+              body: `${icon} **Docs Impact Check:** ${verdict}\n\n${label}`,
+            });
 
       - name: Handle analysis error
         if: steps.verdict.outputs.verdict == 'error'
