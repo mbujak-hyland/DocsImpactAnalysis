@@ -341,6 +341,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Create documentation review issue
+        id: create_issue
         if: steps.verdict.outputs.verdict == 'Required'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         env:
@@ -394,15 +395,24 @@ jobs:
               `@${techWriter} please review the findings above and update the documentation accordingly.`,
             ].join('\n');
 
-            const issue = await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `[Docs Review] PR #${prNumber}: ${prTitle}`,
-              body: body,
-              assignees: [techWriter],
-            });
+            try {
+              const issue = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `[Docs Review] PR #${prNumber}: ${prTitle}`,
+                body: body,
+                assignees: [techWriter],
+              });
 
-            core.info(`Created documentation review issue: ${issue.data.html_url}`);
+              core.setOutput('issue_created', 'true');
+              core.setOutput('issue_url', issue.data.html_url);
+              core.info(`Created documentation review issue: ${issue.data.html_url}`);
+            } catch (error) {
+              const msg = error && error.message ? error.message : 'Unknown error';
+              core.setOutput('issue_created', 'false');
+              core.setOutput('issue_error', msg);
+              core.warning(`Failed to create documentation review issue: ${msg}`);
+            }
 
       - name: Post verdict as PR comment
         if: steps.verdict.outputs.verdict == 'Required' || steps.verdict.outputs.verdict == 'Not Required'
@@ -411,14 +421,22 @@ jobs:
           VERDICT: ${{ steps.verdict.outputs.verdict }}
           REASON: ${{ steps.verdict.outputs.reason }}
           PR_NUMBER: ${{ steps.verdict.outputs.pr_number }}
+          ISSUE_CREATED: ${{ steps.create_issue.outputs.issue_created }}
+          ISSUE_URL: ${{ steps.create_issue.outputs.issue_url }}
+          ISSUE_ERROR: ${{ steps.create_issue.outputs.issue_error }}
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const verdict = process.env.VERDICT;
             const reason  = process.env.REASON;
             const icon    = verdict === 'Required' ? '📋' : '✅';
+            const issueCreated = process.env.ISSUE_CREATED === 'true';
+            const issueUrl = process.env.ISSUE_URL || '';
+            const issueError = process.env.ISSUE_ERROR || '';
             const label   = verdict === 'Required'
-              ? `A documentation review issue has been created and assigned to @${process.env.TECH_WRITER}.`
+              ? (issueCreated
+                  ? `A documentation review issue has been created and assigned to @${process.env.TECH_WRITER}: ${issueUrl}`
+                  : `Docs impact was detected, but creating the review issue failed. Error: ${issueError || 'Unknown error'}.`)
               : `No documentation update required. ${reason}`;
 
             await github.rest.issues.createComment({
