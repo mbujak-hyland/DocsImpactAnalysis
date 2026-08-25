@@ -15,7 +15,7 @@ aux_links_new_tab: true
 gh_edit_link: true
 gh_edit_link_text: "Improve this page on GitHub"
 gh_edit_repository: https://github.com/Alfresco/acs-deployment
-gh_edit_branch: master
+gh_edit_branch: main
 gh_edit_source: .
 gh_edit_view_mode: edit
 

@@ -16,7 +16,7 @@
 services:
   alfresco:
     image: quay.io/alfresco/alfresco-content-repository:26.1.0
-    mem_limit: 1900m
+    mem_limit: 2000m
     environment:
       JAVA_TOOL_OPTIONS: >-
         -Dencryption.keystore.type=JCEKS
