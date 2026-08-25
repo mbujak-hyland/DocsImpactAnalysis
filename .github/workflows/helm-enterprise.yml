@@ -159,7 +159,7 @@ jobs:
           wait-resource: "jobs"
           wait-condition: "complete"
 
-      - name: Spit cluster status after Helm install
+      - name: Print cluster status after Helm install
         if: always() && steps.helm_install.outcome != 'skipped'
         run: |
           helm ls --all-namespaces --all

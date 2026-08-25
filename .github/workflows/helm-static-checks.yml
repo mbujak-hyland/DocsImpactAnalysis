@@ -1,5 +1,5 @@
 ---
-name: Helm static checks
+name: Helm Static Checks
 on:
   pull_request:
     branches:

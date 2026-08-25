@@ -8,7 +8,7 @@ grand_parent: Helm
 
 ![Version: 10.3.2](https://img.shields.io/badge/Version-10.3.2-informational?style=flat-square) ![AppVersion: 26.1.0](https://img.shields.io/badge/AppVersion-26.1.0-informational?style=flat-square)
 
-A Helm chart for deploying Alfresco Content Services
+A Helm chart for deploying Alfresco Content Services 
 
 Please refer to the [documentation](https://github.com/Alfresco/acs-deployment/blob/master/docs/helm/README.md) for information on the Helm charts and deployment instructions.
 
